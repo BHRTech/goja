@@ -1258,6 +1258,22 @@ func TestInf(t *testing.T) {
 	}
 }
 
+func TestTooFewParameters(t *testing.T) {
+	vm := New()
+
+	vm.Set("f", func(a, b, c Value) {
+		if a == nil || b == nil || c == nil {
+			// should be undefined
+			t.Error("a, b or c are nil")
+		}
+	})
+
+	_, err := vm.RunString("f();f(1);f(1,2);f(1,2,3);f(undefined);")
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
 /*
 func TestArrayConcatSparse(t *testing.T) {
 function foo(a,b,c)

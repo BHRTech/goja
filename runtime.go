@@ -1110,6 +1110,11 @@ func (r *Runtime) wrapReflectFunc(value reflect.Value) func(FunctionCall) Value 
 			}
 			in = make([]reflect.Value, n)
 			for i := l; i < n; i++ {
+				if reflect.TypeOf(Undefined()).AssignableTo(typ.In(i)) {
+					in[i] = reflect.ValueOf(Undefined())
+					continue
+				}
+
 				in[i] = reflect.Zero(typ.In(i))
 			}
 		} else {
