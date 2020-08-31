@@ -3,8 +3,10 @@ package goja
 import (
 	"errors"
 	"fmt"
+	"math"
 	"reflect"
 	"runtime"
+	"strconv"
 	"testing"
 	"time"
 )
@@ -17,108 +19,11 @@ func TestGlobalObjectProto(t *testing.T) {
 	testScript1(SCRIPT, valueTrue, t)
 }
 
-func TestArrayProtoProp(t *testing.T) {
-	const SCRIPT = `
-	Object.defineProperty(Array.prototype, '0', {value: 42, configurable: true, writable: false})
-	var a = []
-	a[0] = 1
-	a[0]
-	`
-
-	testScript1(SCRIPT, valueInt(42), t)
-}
-
-func TestArrayDelete(t *testing.T) {
-	const SCRIPT = `
-	var a = [1, 2];
-	var deleted = delete a[0];
-	var undef = a[0] === undefined;
-	var len = a.length;
-
-	deleted && undef && len === 2;
-	`
-
-	testScript1(SCRIPT, valueTrue, t)
-}
-
-func TestArrayDeleteNonexisting(t *testing.T) {
-	const SCRIPT = `
-	Array.prototype[0] = 42;
-	var a = [];
-	delete a[0] && a[0] === 42;
-	`
-
-	testScript1(SCRIPT, valueTrue, t)
-}
-
-func TestArraySetLength(t *testing.T) {
-	const SCRIPT = `
-	var a = [1, 2];
-	var assert0 = a.length == 2;
-	a.length = "1";
-	a.length = 1.0;
-	a.length = 1;
-	var assert1 = a.length == 1;
-	a.length = 2;
-	var assert2 = a.length == 2;
-	assert0 && assert1 && assert2 && a[1] === undefined;
-
-	`
-
-	testScript1(SCRIPT, valueTrue, t)
-}
-
 func TestUnicodeString(t *testing.T) {
 	const SCRIPT = `
 	var s = "Тест";
 	s.length === 4 && s[1] === "е";
 
-	`
-
-	testScript1(SCRIPT, valueTrue, t)
-}
-
-func TestArrayReverseNonOptimisable(t *testing.T) {
-	const SCRIPT = `
-	var a = [];
-	Object.defineProperty(a, "0", {get: function() {return 42}, set: function(v) {Object.defineProperty(a, "0", {value: v + 1, writable: true, configurable: true})}, configurable: true})
-	a[1] = 43;
-	a.reverse();
-
-	a.length === 2 && a[0] === 44 && a[1] === 42;
-	`
-
-	testScript1(SCRIPT, valueTrue, t)
-}
-
-func TestArrayPushNonOptimisable(t *testing.T) {
-	const SCRIPT = `
-	Object.defineProperty(Object.prototype, "0", {value: 42});
-	var a = [];
-	var thrown = false;
-	try {
-		a.push(1);
-	} catch (e) {
-		thrown = e instanceof TypeError;
-	}
-	thrown;
-	`
-
-	testScript1(SCRIPT, valueTrue, t)
-}
-
-func TestArraySetLengthWithPropItems(t *testing.T) {
-	const SCRIPT = `
-	var a = [1,2,3,4];
-	var thrown = false;
-
-	Object.defineProperty(a, "2", {value: 42, configurable: false, writable: false});
-	try {
-		Object.defineProperty(a, "length", {value: 0, writable: false});
-	} catch (e) {
-		thrown = e instanceof TypeError;
-	}
-	thrown && a.length === 3;
 	`
 
 	testScript1(SCRIPT, valueTrue, t)
@@ -231,6 +136,29 @@ func TestFractionalNumberToStringRadix(t *testing.T) {
 	`
 
 	testScript1(SCRIPT, asciiString("3f.gez4w97ry"), t)
+}
+
+func TestNumberFormatRounding(t *testing.T) {
+	const SCRIPT = `
+	assert.sameValue((123.456).toExponential(undefined), "1.23456e+2", "undefined");
+	assert.sameValue((0.000001).toPrecision(2), "0.0000010")
+	assert.sameValue((-7).toPrecision(1), "-7");
+	assert.sameValue((-42).toPrecision(1), "-4e+1");
+	assert.sameValue((0.000001).toPrecision(1), "0.000001");
+	assert.sameValue((123.456).toPrecision(1), "1e+2", "1");
+	assert.sameValue((123.456).toPrecision(2), "1.2e+2", "2");
+
+	var n = new Number("0.000000000000000000001"); // 1e-21
+	assert.sameValue((n).toPrecision(1), "1e-21");
+	assert.sameValue((25).toExponential(0), "3e+1");
+	assert.sameValue((-25).toExponential(0), "-3e+1");
+	assert.sameValue((12345).toExponential(3), "1.235e+4");
+	assert.sameValue((25.5).toFixed(0), "26");
+	assert.sameValue((-25.5).toFixed(0), "-26");
+	assert.sameValue((99.9).toFixed(0), "100");
+	assert.sameValue((99.99).toFixed(1), "100.0");
+	`
+	testScript1(TESTLIB+SCRIPT, _undefined, t)
 }
 
 func TestSetFunc(t *testing.T) {
@@ -361,6 +289,139 @@ func TestInterrupt(t *testing.T) {
 	if err == nil {
 		t.Fatal("Err is nil")
 	}
+}
+
+func TestRuntime_ExportToNumbers(t *testing.T) {
+	vm := New()
+	t.Run("int8/no overflow", func(t *testing.T) {
+		var i8 int8
+		err := vm.ExportTo(vm.ToValue(-123), &i8)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if i8 != -123 {
+			t.Fatalf("i8: %d", i8)
+		}
+	})
+
+	t.Run("int8/overflow", func(t *testing.T) {
+		var i8 int8
+		err := vm.ExportTo(vm.ToValue(333), &i8)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if i8 != 77 {
+			t.Fatalf("i8: %d", i8)
+		}
+	})
+
+	t.Run("int64/uint64", func(t *testing.T) {
+		var ui64 uint64
+		err := vm.ExportTo(vm.ToValue(-1), &ui64)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if ui64 != math.MaxUint64 {
+			t.Fatalf("ui64: %d", ui64)
+		}
+	})
+
+	t.Run("int8/float", func(t *testing.T) {
+		var i8 int8
+		err := vm.ExportTo(vm.ToValue(333.9234), &i8)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if i8 != 77 {
+			t.Fatalf("i8: %d", i8)
+		}
+	})
+
+	t.Run("int8/object", func(t *testing.T) {
+		var i8 int8
+		err := vm.ExportTo(vm.NewObject(), &i8)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if i8 != 0 {
+			t.Fatalf("i8: %d", i8)
+		}
+	})
+
+	t.Run("int/object_cust_valueOf", func(t *testing.T) {
+		var i int
+		obj, err := vm.RunString(`
+		({
+			valueOf: function() { return 42; }
+		})
+		`)
+		if err != nil {
+			t.Fatal(err)
+		}
+		err = vm.ExportTo(obj, &i)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if i != 42 {
+			t.Fatalf("i: %d", i)
+		}
+	})
+
+	t.Run("float32/no_trunc", func(t *testing.T) {
+		var f float32
+		err := vm.ExportTo(vm.ToValue(1.234567), &f)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if f != 1.234567 {
+			t.Fatalf("f: %f", f)
+		}
+	})
+
+	t.Run("float32/trunc", func(t *testing.T) {
+		var f float32
+		err := vm.ExportTo(vm.ToValue(1.234567890), &f)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if f != float32(1.234567890) {
+			t.Fatalf("f: %f", f)
+		}
+	})
+
+	t.Run("float64", func(t *testing.T) {
+		var f float64
+		err := vm.ExportTo(vm.ToValue(1.234567), &f)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if f != 1.234567 {
+			t.Fatalf("f: %f", f)
+		}
+	})
+
+	t.Run("float32/object", func(t *testing.T) {
+		var f float32
+		err := vm.ExportTo(vm.NewObject(), &f)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if f == f { // expecting NaN
+			t.Fatalf("f: %f", f)
+		}
+	})
+
+	t.Run("float64/object", func(t *testing.T) {
+		var f float64
+		err := vm.ExportTo(vm.NewObject(), &f)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if f == f { // expecting NaN
+			t.Fatalf("f: %f", f)
+		}
+	})
+
 }
 
 func TestRuntime_ExportToSlice(t *testing.T) {
@@ -624,9 +685,27 @@ func TestRuntime_ExportToTime(t *testing.T) {
 	if str != "2018-08-13T15:02:13+02:00" {
 		t.Fatalf("Unexpected value: '%s'", str)
 	}
+
+	d, err := vm.RunString(`new Date(1000)`)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ti = time.Time{}
+	err = vm.ExportTo(d, &ti)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if ti.UnixNano() != 1000*1e6 {
+		t.Fatal(ti)
+	}
+	if ti.Location() != time.Local {
+		t.Fatalf("Wrong location: %v", ti)
+	}
 }
 
-func TestRuntime_ExportToFunc(t *testing.T) {
+func ExampleRuntime_ExportTo_func() {
 	const SCRIPT = `
 	function f(param) {
 		return +param + 2;
@@ -636,18 +715,20 @@ func TestRuntime_ExportToFunc(t *testing.T) {
 	vm := New()
 	_, err := vm.RunString(SCRIPT)
 	if err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 
 	var fn func(string) string
-	vm.ExportTo(vm.Get("f"), &fn)
-
-	if res := fn("40"); res != "42" {
-		t.Fatalf("Unexpected value: %q", res)
+	err = vm.ExportTo(vm.Get("f"), &fn)
+	if err != nil {
+		panic(err)
 	}
+
+	fmt.Println(fn("40")) // note, _this_ value in the function will be undefined.
+	// Output: 42
 }
 
-func TestRuntime_ExportToFuncThrow(t *testing.T) {
+func ExampleRuntime_ExportTo_funcThrow() {
 	const SCRIPT = `
 	function f(param) {
 		throw new Error("testing");
@@ -657,26 +738,39 @@ func TestRuntime_ExportToFuncThrow(t *testing.T) {
 	vm := New()
 	_, err := vm.RunString(SCRIPT)
 	if err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 
 	var fn func(string) (string, error)
 	err = vm.ExportTo(vm.Get("f"), &fn)
 	if err != nil {
-		t.Fatal(err)
+		panic(err)
+	}
+	_, err = fn("")
+
+	fmt.Println(err)
+	// Output: Error: testing at f (<eval>:3:9(4))
+}
+
+func ExampleRuntime_ExportTo_funcVariadic() {
+	const SCRIPT = `
+	function f() {
+		return Array.prototype.join.call(arguments, ",");
+	}
+	`
+	vm := New()
+	_, err := vm.RunString(SCRIPT)
+	if err != nil {
+		panic(err)
 	}
 
-	if _, err := fn("40"); err != nil {
-		if ex, ok := err.(*Exception); ok {
-			if msg := ex.Error(); msg != "Error: testing at f (<eval>:3:9(4))" {
-				t.Fatalf("Msg: %q", msg)
-			}
-		} else {
-			t.Fatalf("Error is not *Exception (%T): %v", err, err)
-		}
-	} else {
-		t.Fatal("Expected error")
+	var fn func(args ...interface{}) string
+	err = vm.ExportTo(vm.Get("f"), &fn)
+	if err != nil {
+		panic(err)
 	}
+	fmt.Println(fn("a", "b", 42))
+	// Output: a,b,42
 }
 
 func TestRuntime_ExportToFuncFail(t *testing.T) {
@@ -756,6 +850,29 @@ func TestRuntime_ExportToObject(t *testing.T) {
 	}
 }
 
+func ExampleAssertFunction() {
+	vm := New()
+	_, err := vm.RunString(`
+	function sum(a, b) {
+		return a+b;
+	}
+	`)
+	if err != nil {
+		panic(err)
+	}
+	sum, ok := AssertFunction(vm.Get("sum"))
+	if !ok {
+		panic("Not a function")
+	}
+
+	res, err := sum(Undefined(), vm.ToValue(40), vm.ToValue(2))
+	if err != nil {
+		panic(err)
+	}
+	fmt.Println(res)
+	// Output: 42
+}
+
 func TestGoFuncError(t *testing.T) {
 	const SCRIPT = `
 	try {
@@ -787,8 +904,27 @@ func TestToValueNil(t *testing.T) {
 	var a *T
 	vm := New()
 
+	if v := vm.ToValue(nil); !IsNull(v) {
+		t.Fatalf("nil: %v", v)
+	}
+
 	if v := vm.ToValue(a); !IsNull(v) {
-		t.Fatalf("Expected null, got: %v", v)
+		t.Fatalf("struct ptr: %v", v)
+	}
+
+	var m map[string]interface{}
+	if v := vm.ToValue(m); !IsNull(v) {
+		t.Fatalf("map[string]interface{}: %v", v)
+	}
+
+	var ar []interface{}
+	if v := vm.ToValue(ar); !IsNull(v) {
+		t.Fatalf("[]interface{}: %v", v)
+	}
+
+	var arptr *[]interface{}
+	if v := vm.ToValue(arptr); !IsNull(v) {
+		t.Fatalf("*[]interface{}: %v", v)
 	}
 }
 
@@ -803,6 +939,23 @@ func TestToValueFloat(t *testing.T) {
 	}
 	if v.Export().(bool) != true {
 		t.Fatalf("StrictEquals for golang float failed")
+	}
+}
+
+func TestToValueInterface(t *testing.T) {
+
+	f := func(i interface{}) bool {
+		return i == t
+	}
+	vm := New()
+	vm.Set("f", f)
+	vm.Set("t", t)
+	v, err := vm.RunString(`f(t)`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if v != valueTrue {
+		t.Fatalf("v: %v", v)
 	}
 }
 
@@ -902,6 +1055,38 @@ func TestSortComparatorReturnValues(t *testing.T) {
 	}
 	`
 
+	testScript1(SCRIPT, _undefined, t)
+}
+
+func TestSortComparatorReturnValueFloats(t *testing.T) {
+	const SCRIPT = `
+	var a = [
+		5.97,
+		9.91,
+		4.13,
+		9.28,
+		3.29,
+	];
+	a.sort( function(a, b) { return a - b; } );
+	for (var i = 1; i < a.length; i++) {
+		if (a[i] < a[i-1]) {
+			throw new Error("Array is not sorted: " + a);
+		}
+	}
+	`
+	testScript1(SCRIPT, _undefined, t)
+}
+
+func TestSortComparatorReturnValueNegZero(t *testing.T) {
+	const SCRIPT = `
+	var a = [2, 1];
+	a.sort( function(a, b) { return a > b ? 0 : -0; } );
+	for (var i = 1; i < a.length; i++) {
+		if (a[i] < a[i-1]) {
+			throw new Error("Array is not sorted: " + a);
+		}
+	}
+	`
 	testScript1(SCRIPT, _undefined, t)
 }
 
@@ -1192,7 +1377,7 @@ func TestInterruptInWrappedFunction(t *testing.T) {
 		rt.Interrupt(errors.New("hi"))
 	}()
 
-	v, err = fn(nil)
+	_, err = fn(nil)
 	if err == nil {
 		t.Fatal("expected error")
 	}
@@ -1219,7 +1404,7 @@ func TestRunLoopPreempt(t *testing.T) {
 		vm.Interrupt(errors.New("hi"))
 	}()
 
-	v, err = fn(nil)
+	_, err = fn(nil)
 	if err == nil {
 		t.Fatal("expected error")
 	}
@@ -1256,6 +1441,276 @@ func TestInf(t *testing.T) {
 	if !IsInfinity(NegativeInf()) {
 		t.Fatal("NegativeInfinity() doesn't return Inf")
 	}
+}
+
+func TestRuntimeNew(t *testing.T) {
+	vm := New()
+	v, err := vm.New(vm.Get("Number"), vm.ToValue("12345"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n, ok := v.Export().(int64); ok {
+		if n != 12345 {
+			t.Fatalf("n: %v", n)
+		}
+	} else {
+		t.Fatalf("v: %T", v)
+	}
+}
+
+func TestAutoBoxing(t *testing.T) {
+	const SCRIPT = `
+	function f() {
+		'use strict';
+		var a = 1;
+		var thrown1 = false;
+		var thrown2 = false;
+		try {
+			a.test = 42;
+		} catch (e) {
+			thrown1 = e instanceof TypeError;
+		}
+		try {
+			a["test1"] = 42;
+		} catch (e) {
+			thrown2 = e instanceof TypeError;
+		}
+		return thrown1 && thrown2;
+	}
+	var a = 1;
+	a.test = 42; // should not throw
+	a["test1"] = 42; // should not throw
+	a.test === undefined && a.test1 === undefined && f();
+	`
+
+	testScript1(SCRIPT, valueTrue, t)
+}
+
+func TestProtoGetter(t *testing.T) {
+	const SCRIPT = `
+	({}).__proto__ === Object.prototype && [].__proto__ === Array.prototype;
+	`
+	testScript1(SCRIPT, valueTrue, t)
+}
+
+func TestFuncProto(t *testing.T) {
+	const SCRIPT = `
+	"use strict";
+	function A() {}
+	A.__proto__ = Object;
+	A.prototype = {};
+
+	function B() {}
+	B.__proto__ = Object.create(null);
+	var thrown = false;
+	try {
+		delete B.prototype;
+	} catch (e) {
+		thrown = e instanceof TypeError;
+	}
+	thrown;
+	`
+	testScript1(SCRIPT, valueTrue, t)
+}
+
+func TestSymbol1(t *testing.T) {
+	const SCRIPT = `
+		Symbol.toPrimitive[Symbol.toPrimitive]() === Symbol.toPrimitive;
+	`
+
+	testScript1(SCRIPT, valueTrue, t)
+}
+
+func TestFreezeSymbol(t *testing.T) {
+	const SCRIPT = `
+		var s = Symbol(1);
+		var o = {};
+		o[s] = 42;
+		Object.freeze(o);
+		o[s] = 43;
+		o[s] === 42 && Object.isFrozen(o);
+	`
+
+	testScript1(SCRIPT, valueTrue, t)
+}
+
+func TestToPropertyKey(t *testing.T) {
+	const SCRIPT = `
+	var sym = Symbol(42);
+	var callCount = 0;
+
+	var wrapper = {
+	  toString: function() {
+		callCount += 1;
+		return sym;
+	  },
+	  valueOf: function() {
+		$ERROR("valueOf() called");
+	  }
+	};
+
+	var o = {};
+	o[wrapper] = function() { return "test" };
+	assert.sameValue(o[wrapper], o[sym], "o[wrapper] === o[sym]");
+	assert.sameValue(o[wrapper](), "test", "o[wrapper]()");
+	assert.sameValue(o[sym](), "test", "o[sym]()");
+
+	var wrapper1 = {};
+	wrapper1[Symbol.toPrimitive] = function(hint) {
+		if (hint === "string" || hint === "default") {
+			return "1";
+		}
+		if (hint === "number") {
+			return 2;
+		}
+		$ERROR("Unknown hint value "+hint);
+	};
+	var a = [];
+	a[wrapper1] = 42;
+	assert.sameValue(a[1], 42, "a[1]");
+	assert.sameValue(a[1], a[wrapper1], "a[1] === a[wrapper1]");
+	`
+
+	testScript1(TESTLIB+SCRIPT, _undefined, t)
+}
+
+func TestPrimThisValue(t *testing.T) {
+	const SCRIPT = `
+	function t() {
+		'use strict';
+
+		Boolean.prototype.toString = function() {
+		  return typeof this;
+		};
+
+		assert.sameValue(true.toLocaleString(), "boolean");
+
+		Boolean.prototype[Symbol.iterator] = function() {
+			return [typeof this][Symbol.iterator]();
+		}
+		var s = new Set(true);
+		assert.sameValue(s.size, 1, "size");
+		assert.sameValue(s.has("boolean"), true, "s.has('boolean')");
+	}
+	t();
+	`
+
+	testScript1(TESTLIB+SCRIPT, _undefined, t)
+}
+
+func TestPrimThisValueGetter(t *testing.T) {
+	const SCRIPT = `
+	function t() {
+		'use strict';
+		Object.defineProperty(Boolean.prototype, "toString", {
+		  get: function() {
+			var v = typeof this;
+			return function() {
+			  return v;
+			};
+		  }
+		});
+
+		assert.sameValue(true.toLocaleString(), "boolean");
+	}
+	t();
+	`
+
+	testScript1(TESTLIB+SCRIPT, _undefined, t)
+}
+
+func TestObjSetSym(t *testing.T) {
+	const SCRIPT = `
+	'use strict';
+	var sym = Symbol(true);
+	var p1 = Object.create(null);
+	var p2 = Object.create(p1);
+	
+	Object.defineProperty(p1, sym, {
+	value: 42
+	});
+	
+	Object.defineProperty(p2, sym, {
+	value: 43,
+	writable: true,
+	});
+	var o = Object.create(p2);
+	o[sym] = 44;
+	o[sym];
+	`
+	testScript1(SCRIPT, intToValue(44), t)
+}
+
+func TestObjSet(t *testing.T) {
+	const SCRIPT = `
+	'use strict';
+	var p1 = Object.create(null);
+	var p2 = Object.create(p1);
+	
+	Object.defineProperty(p1, "test", {
+	value: 42
+	});
+	
+	Object.defineProperty(p2, "test", {
+	value: 43,
+	writable: true,
+	});
+	var o = Object.create(p2);
+	o.test = 44;
+	o.test;
+	`
+	testScript1(SCRIPT, intToValue(44), t)
+}
+
+func TestToValueNilValue(t *testing.T) {
+	r := New()
+	var a Value
+	r.Set("a", a)
+	ret, err := r.RunString(`
+	""+a;
+	`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !asciiString("null").SameAs(ret) {
+		t.Fatalf("ret: %v", ret)
+	}
+}
+
+func TestDateConversion(t *testing.T) {
+	now := time.Now()
+	vm := New()
+	val, err := vm.New(vm.Get("Date").ToObject(vm), vm.ToValue(now.UnixNano()/1e6))
+	if err != nil {
+		t.Fatal(err)
+	}
+	vm.Set("d", val)
+	res, err := vm.RunString(`+d`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if exp := res.Export(); exp != now.UnixNano()/1e6 {
+		t.Fatalf("Value does not match: %v", exp)
+	}
+	vm.Set("goval", now)
+	res, err = vm.RunString(`+(new Date(goval.UnixNano()/1e6))`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if exp := res.Export(); exp != now.UnixNano()/1e6 {
+		t.Fatalf("Value does not match: %v", exp)
+	}
+}
+
+func TestNativeCtorNewTarget(t *testing.T) {
+	const SCRIPT = `
+	function NewTarget() {
+	}
+
+	var o = Reflect.construct(Number, [1], NewTarget);
+	o.__proto__ === NewTarget.prototype && o.toString() === "[object Number]";
+	`
+	testScript1(SCRIPT, valueTrue, t)
 }
 
 /*
@@ -1322,5 +1777,46 @@ func BenchmarkMainLoop(b *testing.B) {
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		vm.RunProgram(prg)
+	}
+}
+
+func BenchmarkStringMapGet(b *testing.B) {
+	m := make(map[string]Value)
+	for i := 0; i < 100; i++ {
+		m[strconv.Itoa(i)] = intToValue(int64(i))
+	}
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if m["50"] == nil {
+			b.Fatal()
+		}
+	}
+}
+
+func BenchmarkValueStringMapGet(b *testing.B) {
+	m := make(map[valueString]Value)
+	for i := 0; i < 100; i++ {
+		m[asciiString(strconv.Itoa(i))] = intToValue(int64(i))
+	}
+	b.ResetTimer()
+	var key valueString = asciiString("50")
+	for i := 0; i < b.N; i++ {
+		if m[key] == nil {
+			b.Fatal()
+		}
+	}
+}
+
+func BenchmarkAsciiStringMapGet(b *testing.B) {
+	m := make(map[asciiString]Value)
+	for i := 0; i < 100; i++ {
+		m[asciiString(strconv.Itoa(i))] = intToValue(int64(i))
+	}
+	b.ResetTimer()
+	var key = asciiString("50")
+	for i := 0; i < b.N; i++ {
+		if m[key] == nil {
+			b.Fatal()
+		}
 	}
 }

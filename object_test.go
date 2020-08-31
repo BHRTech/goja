@@ -1,12 +1,15 @@
 package goja
 
-import "testing"
+import (
+	"reflect"
+	"testing"
+)
 
 func TestArray1(t *testing.T) {
 	r := &Runtime{}
 	a := r.newArray(nil)
-	a.put(valueInt(0), asciiString("test"), true)
-	if l := a.getStr("length").ToInteger(); l != 1 {
+	a.setOwnIdx(valueInt(0), asciiString("test"), true)
+	if l := a.getStr("length", nil).ToInteger(); l != 1 {
 		t.Fatalf("Unexpected length: %d", l)
 	}
 }
@@ -67,6 +70,177 @@ func TestDefineProperty(t *testing.T) {
 	}
 }
 
+func TestPropertyOrder(t *testing.T) {
+	const SCRIPT = `
+	var o = {};
+	var sym1 = Symbol(1);
+	var sym2 = Symbol(2);
+	o[sym2] = 1;
+	o[4294967294] = 1;
+	o[2] = 1;
+	o[1] = 1;
+	o[0] = 1;
+	o["02"] = 1;
+	o[4294967295] = 1;
+	o["01"] = 1;
+	o["00"] = 1;
+	o[sym1] = 1;
+	var expected = ["0", "1", "2", "4294967294", "02", "4294967295", "01", "00", sym2, sym1];
+	var actual = Reflect.ownKeys(o);
+	if (actual.length !== expected.length) {
+		throw new Error("Unexpected length: "+actual.length);
+	}
+	for (var i = 0; i < actual.length; i++) {
+		if (actual[i] !== expected[i]) {
+			throw new Error("Unexpected list: " + actual);
+		}
+	}
+	`
+
+	testScript1(SCRIPT, _undefined, t)
+}
+
+func TestDefinePropertiesSymbol(t *testing.T) {
+	const SCRIPT = `
+	var desc = {};
+	desc[Symbol.toStringTag] = {value: "Test"};
+	var o = {};
+	Object.defineProperties(o, desc);
+	o[Symbol.toStringTag] === "Test";
+	`
+
+	testScript1(SCRIPT, valueTrue, t)
+}
+
+func TestObjectAssign(t *testing.T) {
+	const SCRIPT = `
+	assert.sameValue(Object.assign({ b: 1 }, { get a() {
+          Object.defineProperty(this, "b", {
+            value: 3,
+            enumerable: false
+          });
+        }, b: 2 }).b, 1, "#1");
+
+	assert.sameValue(Object.assign({ b: 1 }, { get a() {
+          delete this.b;
+        }, b: 2 }).b, 1, "#2");
+	`
+	testScript1(TESTLIB+SCRIPT, _undefined, t)
+}
+
+func TestExportCircular(t *testing.T) {
+	vm := New()
+	o := vm.NewObject()
+	o.Set("o", o)
+	v := o.Export()
+	if m, ok := v.(map[string]interface{}); ok {
+		if reflect.ValueOf(m["o"]).Pointer() != reflect.ValueOf(v).Pointer() {
+			t.Fatal("Unexpected value")
+		}
+	} else {
+		t.Fatal("Unexpected type")
+	}
+
+	res, err := vm.RunString(`var a = []; a[0] = a;`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	v = res.Export()
+	if a, ok := v.([]interface{}); ok {
+		if reflect.ValueOf(a[0]).Pointer() != reflect.ValueOf(v).Pointer() {
+			t.Fatal("Unexpected value")
+		}
+	} else {
+		t.Fatal("Unexpected type")
+	}
+}
+
+type test_s struct {
+	S *test_s1
+}
+type test_s1 struct {
+	S *test_s
+}
+
+func TestExportToCircular(t *testing.T) {
+	vm := New()
+	o := vm.NewObject()
+	o.Set("o", o)
+	var m map[string]interface{}
+	err := vm.ExportTo(o, &m)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	type K string
+	type T map[K]T
+	var m1 T
+	err = vm.ExportTo(o, &m1)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	type A []A
+	var a A
+	res, err := vm.RunString("var a = []; a[0] = a;")
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = vm.ExportTo(res, &a)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if &a[0] != &a[0][0] {
+		t.Fatal("values do not match")
+	}
+
+	o = vm.NewObject()
+	o.Set("S", o)
+	var s test_s
+	err = vm.ExportTo(o, &s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s.S.S != &s {
+		t.Fatalf("values do not match: %v, %v", s.S.S, &s)
+	}
+
+	type test_s2 struct {
+		S  interface{}
+		S1 *test_s2
+	}
+
+	var s2 test_s2
+	o.Set("S1", o)
+
+	err = vm.ExportTo(o, &s2)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if m, ok := s2.S.(map[string]interface{}); ok {
+		if reflect.ValueOf(m["S"]).Pointer() != reflect.ValueOf(m).Pointer() {
+			t.Fatal("Unexpected m.S")
+		}
+	} else {
+		t.Fatalf("Unexpected s2.S type: %T", s2.S)
+	}
+	if s2.S1 != &s2 {
+		t.Fatal("Unexpected s2.S1")
+	}
+
+	o1 := vm.NewObject()
+	o1.Set("S", o)
+	o1.Set("S1", o)
+	err = vm.ExportTo(o1, &s2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s2.S1.S1 != s2.S1 {
+		t.Fatal("Unexpected s2.S1.S1")
+	}
+}
+
 func BenchmarkPut(b *testing.B) {
 	v := &Object{}
 
@@ -82,7 +256,7 @@ func BenchmarkPut(b *testing.B) {
 	var val Value = valueInt(123)
 
 	for i := 0; i < b.N; i++ {
-		o.put(key, val, false)
+		v.setOwn(key, val, false)
 	}
 }
 
@@ -101,7 +275,7 @@ func BenchmarkPutStr(b *testing.B) {
 	var val Value = valueInt(123)
 
 	for i := 0; i < b.N; i++ {
-		o.putStr("test", val, false)
+		o.setOwnStr("test", val, false)
 	}
 }
 
@@ -119,7 +293,7 @@ func BenchmarkGet(b *testing.B) {
 	var n Value = asciiString("test")
 
 	for i := 0; i < b.N; i++ {
-		o.get(n)
+		v.get(n, nil)
 	}
 
 }
@@ -136,7 +310,7 @@ func BenchmarkGetStr(b *testing.B) {
 	o.init()
 
 	for i := 0; i < b.N; i++ {
-		o.getStr("test")
+		o.getStr("test", nil)
 	}
 }
 
@@ -153,7 +327,7 @@ func BenchmarkToString1(b *testing.B) {
 	v := asciiString("test")
 
 	for i := 0; i < b.N; i++ {
-		v.ToString()
+		v.toString()
 	}
 }
 
@@ -190,11 +364,11 @@ func BenchmarkArrayGetStr(b *testing.B) {
 
 	a.init()
 
-	a.put(valueInt(0), asciiString("test"), false)
+	v.setOwn(valueInt(0), asciiString("test"), false)
 	b.StartTimer()
 
 	for i := 0; i < b.N; i++ {
-		a.getStr("0")
+		a.getStr("0", nil)
 	}
 
 }
@@ -216,12 +390,12 @@ func BenchmarkArrayGet(b *testing.B) {
 
 	var idx Value = valueInt(0)
 
-	a.put(idx, asciiString("test"), false)
+	v.setOwn(idx, asciiString("test"), false)
 
 	b.StartTimer()
 
 	for i := 0; i < b.N; i++ {
-		a.get(idx)
+		v.get(idx, nil)
 	}
 
 }
@@ -249,7 +423,7 @@ func BenchmarkArrayPut(b *testing.B) {
 	b.StartTimer()
 
 	for i := 0; i < b.N; i++ {
-		a.put(idx, val, false)
+		v.setOwn(idx, val, false)
 	}
 
 }
@@ -267,9 +441,9 @@ func BenchmarkAdd(b *testing.B) {
 	y = valueInt(2)
 
 	for i := 0; i < b.N; i++ {
-		if xi, ok := x.assertInt(); ok {
-			if yi, ok := y.assertInt(); ok {
-				x = valueInt(xi + yi)
+		if xi, ok := x.(valueInt); ok {
+			if yi, ok := y.(valueInt); ok {
+				x = xi + yi
 			}
 		}
 	}
@@ -284,8 +458,8 @@ func BenchmarkAddString(b *testing.B) {
 
 	for i := 0; i < b.N; i++ {
 		var z Value
-		if xi, ok := x.assertString(); ok {
-			if yi, ok := y.assertString(); ok {
+		if xi, ok := x.(valueString); ok {
+			if yi, ok := y.(valueString); ok {
 				z = xi.concat(yi)
 			}
 		}

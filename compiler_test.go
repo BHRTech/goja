@@ -27,7 +27,7 @@ func testScript(script string, expectedResult Value, t *testing.T) {
 	t.Logf("stack size: %d", len(vm.stack))
 	t.Logf("stashAllocs: %d", vm.stashAllocs)
 
-	v := vm.r.globalObject.self.getStr("rv")
+	v := vm.r.globalObject.self.getStr("rv", nil)
 	if v == nil {
 		v = _undefined
 	}
@@ -66,6 +66,10 @@ func testScript1(script string, expectedResult Value, t *testing.T) {
 
 	if vm.sp != 0 {
 		t.Fatalf("sp: %d", vm.sp)
+	}
+
+	if l := len(vm.iterStack); l > 0 {
+		t.Fatalf("iter stack is not empty: %d", l)
 	}
 }
 
@@ -886,10 +890,10 @@ func TestPostDecObj(t *testing.T) {
 
 func TestPropAcc1(t *testing.T) {
 	const SCRIPT = `
-	1..toString() === "1"
+	1..toString()
 	`
 
-	testScript1(SCRIPT, valueTrue, t)
+	testScript1(SCRIPT, asciiString("1"), t)
 }
 
 func TestEvalDirect(t *testing.T) {
@@ -1966,6 +1970,131 @@ func TestEmptyCodeError(t *testing.T) {
 			t.Fatalf("Unexpected error: '%s'", e)
 		}
 	}
+}
+
+func TestForOfArray(t *testing.T) {
+	const SCRIPT = `
+	var array = [0, 'a', true, false, null, /* hole */, undefined, NaN];
+	var i = 0;
+	
+	for (var value of array) {
+	  assert.sameValue(value, array[i], 'element at index ' + i);
+	  i++;
+	}
+	
+	assert.sameValue(i, 8, 'Visits all elements');
+	`
+	testScript1(TESTLIB+SCRIPT, _undefined, t)
+}
+
+func TestForOfReturn(t *testing.T) {
+	const SCRIPT = `
+	var callCount = 0;
+	var iterationCount = 0;
+	var iterable = {};
+	var x = {
+	  set attr(_) {
+		throw new Test262Error();
+	  }
+	};
+	
+	iterable[Symbol.iterator] = function() {
+	  return {
+		next: function() {
+		  return { done: false, value: 0 };
+		},
+		return: function() {
+		  callCount += 1;
+		}
+	  }
+	};
+	
+	assert.throws(Test262Error, function() {
+	  for (x.attr of iterable) {
+		iterationCount += 1;
+	  }
+	});
+	
+	assert.sameValue(iterationCount, 0, 'The loop body is not evaluated');
+	assert.sameValue(callCount, 1, 'Iterator is closed');
+	`
+	testScript1(TESTLIB+SCRIPT, _undefined, t)
+}
+
+func TestReturnFromForInLoop(t *testing.T) {
+	const SCRIPT = `
+	(function f() {
+		for (var i in {a: 1}) {
+			return true;
+		}
+	})();
+	`
+	testScript1(SCRIPT, valueTrue, t)
+}
+
+func TestReturnFromForOfLoop(t *testing.T) {
+	const SCRIPT = `
+	(function f() {
+		for (var i of [1]) {
+			return true;
+		}
+	})();
+	`
+	testScript1(SCRIPT, valueTrue, t)
+}
+
+func TestIfStackLeaks(t *testing.T) {
+	const SCRIPT = `
+	var t = 0;
+	if (t === 0) {
+		t;
+	}
+	`
+	testScript1(SCRIPT, _positiveZero, t)
+}
+
+func TestWithCallee(t *testing.T) {
+	const SCRIPT = `
+	function O() {
+		var that = this;
+		this.m = function() {
+			return this === that;
+		}
+	}
+	with(new O()) {
+		m();
+	}
+	`
+	testScript1(SCRIPT, valueTrue, t)
+}
+
+func TestEvalCallee(t *testing.T) {
+	const SCRIPT = `
+	(function () {
+		'use strict';
+		var v = function() {
+			return this === undefined;
+		};
+		return eval('v()');
+	})();
+	`
+	testScript1(SCRIPT, valueTrue, t)
+}
+
+func TestTryEmptyCatchStackLeak(t *testing.T) {
+	const SCRIPT = `
+	(function() {
+		var f;
+		// Make sure the outer function is not stashless as retStashless masks all stack leaks.
+		(function() {
+			f++;
+		})();
+		try {
+			throw new Error();
+		} catch(e) {}
+	})();
+	`
+	testScript1(SCRIPT, _undefined, t)
 }
 
 // FIXME
