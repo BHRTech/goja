@@ -2216,6 +2216,17 @@ func (r *Runtime) toReflectValue(v Value, dst reflect.Value, ctx *objectExportCt
 						v = o
 					} else {
 						v = o.self.getStr(unistring.NewFromString(name), nil)
+						// BHRTech patch: older goja matched object->struct
+						// conversion by the raw Go field name (PascalCase). The
+						// FieldNameMapper now lowercases names, which broke the
+						// process API that fills structs from object literals with
+						// capitalised keys (e.g. {Name, Type, Param}). Fall back to
+						// the field name when the mapped name is absent so both
+						// conventions keep working. Reads/enumeration are a separate
+						// code path and remain unchanged.
+						if v == nil && name != field.Name {
+							v = o.self.getStr(unistring.NewFromString(field.Name), nil)
+						}
 					}
 
 					if v != nil {
