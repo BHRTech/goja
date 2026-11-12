@@ -1,6 +1,8 @@
 goja
 ====
 
+> **BHRTech fork:** see [BHR_VERSIONING.md](BHR_VERSIONING.md) for branches, upstream merges and release tags.
+
 ECMAScript 5.1(+) implementation in Go.
 
 [![Go Reference](https://pkg.go.dev/badge/github.com/dop251/goja.svg)](https://pkg.go.dev/github.com/dop251/goja)
